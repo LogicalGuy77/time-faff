@@ -1,4 +1,4 @@
-Tasks,Status categories,Tags,Time(in hrs),Impact(priority)
+Tasks,Status categories,Tags,Time(in hrs),Impact
 Order protein bar,"Single, Parent, Couple","Health and Fitness, Social and dining, Work and Career, Pet Care, Travel and mobility, Event Planning",2,Low
 Order supplements,"Single, Couple, Parent","Health and Fitness, Social and dining, Pregnancy and Baby",0.5,Low
 Research protein,"Single, Parent, Couple","Health and Fitness, Social and dining",2,High
@@ -212,3 +212,4 @@ Book Tatkal train,"Single, Parents, Couple","Travel and mobility, Work and Caree
 Find travel spots,"Single, Parents, Couple","Travel and mobility, Work and Career",4,High
 Order travel snacks,"Single, Parents, Couple","Travel and mobility, Work and Career",2.5,Medium
 Book temp stays,"Single, Parents, Couple","Travel and mobility, Work and Career",1,High
+

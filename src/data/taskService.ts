@@ -136,20 +136,22 @@ const parseTasksFromCSV = async (): Promise<Task[]> => {
       (row: any, index: number): Task => {
         const title = row.Tasks?.trim() || "Untitled Task";
         const timeInHours = parseTimeString(row["Time(in hrs)"]);
+        const tags =
+          row.Tags?.split(",").map((t: string) => normalizeTag(t.trim())) || [];
 
         return {
           id: `task-${index + 1}`,
           title,
           time: formatTime(timeInHours),
           timeInMinutes: Math.round(timeInHours * 60),
-          impact: row["Impact(priority)"]?.trim() || "Low",
+          impact: row.Impact?.trim() || "Low",
           image: findImageForTask(title),
-          category:
-            row.Tags?.split(",").map((t: string) => normalizeTag(t)) || [],
+          // Only store the primary category initially
+          category: tags.length > 0 ? [tags[0]] : [],
           status:
             row["Status categories"]
               ?.split(",")
-              .map((s: string) => normalizeStatus(s)) || [],
+              .map((s: string) => normalizeStatus(s.trim())) || [],
         };
       }
     );
@@ -166,44 +168,82 @@ export const allTasksPromise: Promise<Task[]> = parseTasksFromCSV();
 export const categoryFilters: readonly Tag[] = TAGS;
 
 /**
- * Filters and sorts tasks based on user status and selected tags.
+ * Generates a list of 5 categories for a task based on user status.
+ * @param primaryTag - The primary, most relevant tag for the task.
+ * @param userStatus - The user's status.
+ * @returns An array of 5 tags.
+ */
+const generateTaskCategories = (
+  primaryTag: Tag,
+  userStatus: UserStatus
+): Tag[] => {
+  if (!primaryTag) {
+    return [];
+  }
+
+  const priorityMap = tagPriorityMaps[userStatus];
+  if (!priorityMap) {
+    return [primaryTag]; // Fallback if status has no priority map
+  }
+
+  // Create a sorted list of all possible tags by priority for the given status
+  const sortedTags = [...TAGS].sort((a, b) => {
+    const priorityA = priorityMap[normalizeString(a)] ?? 999;
+    const priorityB = priorityMap[normalizeString(b)] ?? 999;
+    return priorityA - priorityB;
+  });
+
+  // Filter out the primary tag and take the next 4
+  const additionalTags = sortedTags
+    .filter((tag) => normalizeString(tag) !== normalizeString(primaryTag))
+    .slice(0, 4);
+
+  return [primaryTag, ...additionalTags];
+};
+
+/**
+ * Filters and sorts tasks based on user status and selected tags, following the new hero task logic.
  * @param taskList - The complete list of tasks.
  * @param userStatus - The user's current status (e.g., 'Single').
  * @param userTags - An array of tags selected by the user.
- * @returns A sorted and filtered array of tasks.
+ * @returns A sorted and filtered array of up to 15 tasks.
  */
 export const getTopTasks = (
   taskList: Task[],
   userStatus: UserStatus,
   userTags: string[]
 ): Task[] => {
-  // Case 1: No status selected - return all tasks sorted by impact only
+  // Case 1: No status selected - do not proceed.
   if (!userStatus) {
-    return [...taskList].sort(
-      (a, b) => impactOrder[a.impact] - impactOrder[b.impact]
-    );
+    return [];
   }
 
-  // Case 2: Status selected but no categories - filter by status and prioritize by status preferences
-  if (userTags.length === 0) {
-    const normalizedUserStatus = normalizeString(userStatus);
-    const priorityMap = tagPriorityMaps[userStatus] || {};
+  // Dynamically generate categories for each task based on user status
+  const tasksWithDynamicCategories = taskList.map((task) => {
+    const primaryTag = task.category[0];
+    if (!primaryTag) {
+      return task; // Return task as-is if it has no primary category
+    }
+    const newCategories = generateTaskCategories(primaryTag, userStatus);
+    return { ...task, category: newCategories };
+  });
 
+  const normalizedUserStatus = normalizeString(userStatus);
+  const priorityMap = tagPriorityMaps[userStatus] || {};
+
+  // Case 2: Status selected but no categories - show all tasks for that persona, sorted.
+  if (userTags.length === 0) {
     // Filter tasks that match the user status
-    const statusFilteredTasks = taskList.filter((task) => {
-      const taskStatuses = task.status.map((status) => normalizeString(status));
-      return taskStatuses.includes(normalizedUserStatus);
-    });
+    const statusFilteredTasks = tasksWithDynamicCategories.filter((task) =>
+      task.status.map(normalizeString).includes(normalizedUserStatus)
+    );
 
     // Apply priority scoring based on status preferences
     const tasksWithScores = statusFilteredTasks.map((task) => {
       const taskTags = task.category.map(normalizeString);
-
-      // Find the best (lowest) priority score from all task categories for this user status
       const priorityScore = Math.min(
         ...taskTags.map((tag) => priorityMap[tag] ?? 999)
       );
-
       return { ...task, priorityScore };
     });
 
@@ -211,112 +251,121 @@ export const getTopTasks = (
     tasksWithScores.sort((a, b) => {
       const impactDiff = impactOrder[a.impact] - impactOrder[b.impact];
       if (impactDiff !== 0) return impactDiff;
-
       const scoreDiff = a.priorityScore - b.priorityScore;
       if (scoreDiff !== 0) return scoreDiff;
-
       return a.title.localeCompare(b.title);
     });
 
     return tasksWithScores;
   }
 
-  // Case 3: Both status and categories selected - show popular tasks from each category first
-  const normalizedUserStatus = normalizeString(userStatus);
+  // Case 3: Both status and categories selected - apply the new hero task logic.
   const normalizedUserTags = userTags.map(normalizeString);
-  const priorityMap = tagPriorityMaps[userStatus] || {};
 
-  const filteredTasks = taskList.filter((task) => {
-    // Check if user status matches any of the task's statuses
-    const taskStatuses = task.status.map((status) => normalizeString(status));
-    const statusMatch = taskStatuses.includes(normalizedUserStatus);
-
+  // Filter tasks that match both status and at least one category.
+  const filteredTasks = tasksWithDynamicCategories.filter((task) => {
+    const statusMatch = task.status
+      .map(normalizeString)
+      .includes(normalizedUserStatus);
     if (!statusMatch) return false;
 
-    // Check if there's at least one overlapping tag
-    const taskTags = task.category.map(normalizeString);
-    const hasOverlappingTag = normalizedUserTags.some((userTag) =>
-      taskTags.includes(userTag)
-    );
-
-    return hasOverlappingTag;
+    const categoryMatch = task.category
+      .map(normalizeString)
+      .some((taskTag) => normalizedUserTags.includes(taskTag));
+    return categoryMatch;
   });
 
-  // Find popular tasks for each selected category
-  const popularTasks: Task[] = [];
-  const popularTaskTitles = new Set<string>();
+  if (filteredTasks.length === 0) {
+    return []; // No tasks match the criteria.
+  }
 
-  normalizedUserTags.forEach((selectedTag) => {
-    const popularTaskTitle = categoryPopularTasks[selectedTag];
-    if (popularTaskTitle) {
-      const normalizedPopularTaskTitle = normalizeString(popularTaskTitle);
-      const popularTask = filteredTasks.find(
-        (task) => normalizeString(task.title) === normalizedPopularTaskTitle
-      );
-      if (
-        popularTask &&
-        !popularTaskTitles.has(normalizeString(popularTask.title))
-      ) {
-        popularTasks.push(popularTask);
-        popularTaskTitles.add(normalizeString(popularTask.title));
-      }
+  // --- Hero Task Selection (Position 1) ---
+  const getPriorityScore = (task: Task) => {
+    const taskTags = task.category.map(normalizeString);
+    const relevantTags = taskTags.filter((tag) =>
+      normalizedUserTags.includes(tag)
+    );
+    if (relevantTags.length === 0) return 999;
+    return Math.min(...relevantTags.map((tag) => priorityMap[tag] ?? 999));
+  };
+
+  // Find the pre-defined popular task for the highest-priority selected category
+  const highestPriorityCategory = normalizedUserTags.sort(
+    (a, b) => (priorityMap[a] ?? 999) - (priorityMap[b] ?? 999)
+  )[0];
+
+  const popularTaskTitle = categoryPopularTasks[highestPriorityCategory];
+  let heroTask: Task | undefined = popularTaskTitle
+    ? filteredTasks.find(
+        (task) => normalizeString(task.title) === normalizeString(popularTaskTitle)
+      )
+    : undefined;
+
+  // If a popular task is found and it has high impact, it becomes the hero task.
+  if (heroTask && heroTask.impact === "High") {
+    heroTask = { ...heroTask, isPopular: true };
+  } else {
+    // Fallback to original hero task logic if no high-impact popular task is found
+    const highImpactTasks = filteredTasks.filter(
+      (task) => task.impact === "High"
+    );
+
+    if (highImpactTasks.length > 0) {
+      highImpactTasks.sort((a, b) => {
+        const scoreDiff = getPriorityScore(a) - getPriorityScore(b);
+        if (scoreDiff !== 0) return scoreDiff;
+        return a.title.localeCompare(b.title);
+      });
+      heroTask = { ...highImpactTasks[0], isPopular: true };
     }
-  });
+  }
 
-  // Get remaining tasks (excluding popular ones already added)
-  const remainingTasks = filteredTasks.filter(
-    (task) => !popularTaskTitles.has(normalizeString(task.title))
-  );
-
-  // Add priority scores to both popular and remaining tasks
-  const popularTasksWithScores = popularTasks.map((task) => {
-    const taskTags = task.category.map(normalizeString);
-    const overlappingTags = normalizedUserTags.filter((userTag) =>
-      taskTags.includes(userTag)
+  if (heroTask) {
+    const finalHeroTask = heroTask; // To satisfy TypeScript's non-undefined check
+    let remainingTasks = filteredTasks.filter(
+      (task) => task.id !== finalHeroTask.id
     );
 
-    const priorityScore = Math.min(
-      ...overlappingTags.map((tag) => priorityMap[tag] ?? 999)
+    // --- Top 5 High-Relevance Tasks (Positions 2-5) ---
+    const top4Tasks: Task[] = [];
+    const highImpactRemaining = remainingTasks
+      .filter((task) => task.impact === "High")
+      .sort((a, b) => {
+        const scoreDiff = getPriorityScore(a) - getPriorityScore(b);
+        if (scoreDiff !== 0) return scoreDiff;
+        return a.title.localeCompare(b.title);
+      });
+
+    top4Tasks.push(...highImpactRemaining.slice(0, 4));
+    remainingTasks = remainingTasks.filter(
+      (task) => !top4Tasks.some((topTask) => topTask.id === task.id)
     );
 
-    return { ...task, priorityScore, isPopular: true };
-  });
+    // --- Remaining Tasks (Positions 6-15) ---
+    const otherTasks = remainingTasks
+      .map((task) => ({ ...task, priorityScore: getPriorityScore(task) }))
+      .sort((a, b) => {
+        const impactDiff = impactOrder[a.impact] - impactOrder[b.impact];
+        if (impactDiff !== 0) return impactDiff;
+        const scoreDiff = a.priorityScore - b.priorityScore;
+        if (scoreDiff !== 0) return scoreDiff;
+        return a.title.localeCompare(b.title);
+      });
 
-  const remainingTasksWithScores = remainingTasks.map((task) => {
-    const taskTags = task.category.map(normalizeString);
-    const overlappingTags = normalizedUserTags.filter((userTag) =>
-      taskTags.includes(userTag)
-    );
+    const finalTasks = [finalHeroTask, ...top4Tasks, ...otherTasks];
+    return finalTasks.slice(0, 15);
+  }
 
-    const priorityScore = Math.min(
-      ...overlappingTags.map((tag) => priorityMap[tag] ?? 999)
-    );
+  // Fallback if no hero task is found at all
+  const sortedTasks = filteredTasks
+    .map((task) => ({ ...task, priorityScore: getPriorityScore(task) }))
+    .sort((a, b) => {
+      const impactDiff = impactOrder[a.impact] - impactOrder[b.impact];
+      if (impactDiff !== 0) return impactDiff;
+      const scoreDiff = a.priorityScore - b.priorityScore;
+      if (scoreDiff !== 0) return scoreDiff;
+      return a.title.localeCompare(b.title);
+    });
 
-    return { ...task, priorityScore, isPopular: false };
-  });
-
-  // Sort popular tasks by impact, then priority score, then alphabetically
-  popularTasksWithScores.sort((a, b) => {
-    const impactDiff = impactOrder[a.impact] - impactOrder[b.impact];
-    if (impactDiff !== 0) return impactDiff;
-
-    const scoreDiff = a.priorityScore - b.priorityScore;
-    if (scoreDiff !== 0) return scoreDiff;
-
-    return a.title.localeCompare(b.title);
-  });
-
-  // Sort remaining tasks by impact, then priority score, then alphabetically
-  remainingTasksWithScores.sort((a, b) => {
-    const impactDiff = impactOrder[a.impact] - impactOrder[b.impact];
-    if (impactDiff !== 0) return impactDiff;
-
-    const scoreDiff = a.priorityScore - b.priorityScore;
-    if (scoreDiff !== 0) return scoreDiff;
-
-    return a.title.localeCompare(b.title);
-  });
-
-  // Return popular tasks first, then remaining tasks
-  return [...popularTasksWithScores, ...remainingTasksWithScores];
+  return sortedTasks.slice(0, 15); // Limit to 15 tasks
 };
